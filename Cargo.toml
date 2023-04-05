@@ -1,0 +1,12 @@
+[package]
+name = "burstshark"
+version = "0.1.0"
+authors = ["Martin Björklund <martinbjorklund94@gmail.com>"]
+description = "BurstShark is a network traffic analysis tool that wraps around tshark to identify and analyze bursty application data traffic, such as adaptive streaming, in real-time or from pcap files."
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.2.0", features = ["derive", "env"] }
+ctrlc = "3.2.5"
+macaddr = "1.0.1"
+nix = "0.26.2"
