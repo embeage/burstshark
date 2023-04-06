@@ -155,7 +155,7 @@ fn capture_filter(protocol: &Protocol, src: &Option<Vec<String>>, dst: &Option<V
             )
         },
         Protocol::Ip => {    
-            let default = "ip";
+            let default = "(ip or ip6) and (tcp or udp)";
             extend_filter(
                 &extend_filter(
                     default, 
@@ -193,7 +193,7 @@ fn display_filter(protocol: &Protocol, src: &Option<Vec<String>>, dst: &Option<V
             )
         },
         Protocol::Ip => {    
-            let default = "ip";
+            let default = "(ip or ipv6) and (tcp or udp)";
             extend_filter(
                 &extend_filter(
                     default, 
