@@ -32,7 +32,8 @@ Options:
   -w, --write-capture <CAPTURE_OUTFILE> Write captured packets by tshark to a capture file
   -W, --write-bursts <BURSTS_OUTFILE> Write output from BurstShark to a file
   -q, --suppress Don't show any bursts on the standard output
-  -B, --min-bytes <MIN_BYTES> Only show bursts with a minimum amount of bytes
+  -b, --min-bytes <MIN_BYTES> Only show bursts with a minimum amount of bytes
+  -B, --max-bytes <MAX_BYTES> Only show bursts with a maximum amount of bytes
   -P, --min-packets <MIN_PACKETS> Only show bursts with a minimum amount of packets/frames
   -G, --no-guess Disable guessing sizes of WLAN data frames missed by the monitor mode device
   -M, --max-deviation <MAX_DEVIATION> Maximum allowed deviation from the expected sequence number for WLAN frames [default: 50]

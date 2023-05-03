@@ -46,8 +46,12 @@ struct Args {
     suppress: bool,
 
     /// Only show bursts with a minimum amount of bytes.
-    #[clap(short = 'B', long = "min-bytes")]
+    #[clap(short = 'b', long = "min-bytes")]
     min_bytes: Option<u32>,
+
+    /// Only show bursts with a maximum amount of bytes.
+    #[clap(short = 'B', long = "max-bytes")]
+    max_bytes: Option<u32>,
 
     /// Only show bursts with a minimum amount of packets/frames.
     #[clap(short = 'P', long = "min-packets")]
@@ -238,6 +242,7 @@ fn main() {
         args.bursts_outfile.clone(),
         args.suppress,
         args.min_bytes,
+        args.max_bytes,
         args.min_packets,
     );
 
