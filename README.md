@@ -7,6 +7,7 @@ BurstShark is a network traffic analysis tool that wraps around tshark to identi
 Each output line contains the following information:
 
 * Burst counter (incremental)
+* Completion time of the burst (timestamp)
 * Source IP or MAC address
 * Destination IP or MAC address
 * Start time of the burst (timestamp)

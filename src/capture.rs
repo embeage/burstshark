@@ -18,6 +18,7 @@ use ctrlc;
  
 #[derive(Debug, Clone)]
 pub struct Burst {
+    pub completion_time: f64,
     pub src: String,
     pub dst: String,
     pub start: f64,
@@ -162,9 +163,9 @@ impl IpFlow {
         IpFlow {
             inactive_time: inactive_time,
             current_burst: Burst::new(
+                p.time_relative,
                 p.src.to_string(),
                 p.dst.to_string(),
-                p.time_relative,
                 p.data_len,
             ),
         }
@@ -172,8 +173,9 @@ impl IpFlow {
 
     fn add_packet(&mut self, p: &IpPacket, tx: &Sender<Burst>) {
         if p.time_relative - self.current_burst.end > self.inactive_time {
+            self.current_burst.completion_time = p.time_relative;
             tx.send(self.current_burst.clone()).unwrap();
-            self.current_burst = Burst::new(p.src.to_string(), p.dst.to_string(), p.time_relative, p.data_len);
+            self.current_burst = Burst::new(p.time_relative, p.src.to_string(), p.dst.to_string(), p.data_len);
         } else {
             self.current_burst.end = p.time_relative;
             self.current_burst.num_packets += 1;
@@ -187,9 +189,9 @@ impl WlanFlow {
         WlanFlow {
             inactive_time: inactive_time,
             current_burst: Burst::new(
+                p.time_relative,
                 p.src.to_string(),
                 p.dst.to_string(),
-                p.time_relative,
                 p.data_len,
             ),
             expected_seq_number: p.seq_number,
@@ -201,8 +203,9 @@ impl WlanFlow {
 
     fn add_packet(&mut self, p: &WlanPacket, tx: &Sender<Burst>) {
         if p.time_relative - self.current_burst.end > self.inactive_time {
+            self.current_burst.completion_time = p.time_relative;
             tx.send(self.current_burst.clone()).unwrap();
-            self.current_burst = Burst::new(p.src.to_string(), p.dst.to_string(), p.time_relative, p.data_len);
+            self.current_burst = Burst::new(p.time_relative, p.src.to_string(), p.dst.to_string(), p.data_len);
             
             // Accept sequence number of packet after the inactive time.
             self.expected_seq_number = (p.seq_number + 1) & 4095;
@@ -255,8 +258,9 @@ impl WlanFlow {
 }
 
 impl Burst {
-    fn new(src: String, dst: String, time: f64, init_size: u32) -> Self {
+    fn new(time: f64, src: String, dst: String, init_size: u32) -> Self {
         Burst {
+            completion_time: time,
             src: src,
             dst: dst,
             start: time,

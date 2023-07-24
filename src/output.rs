@@ -66,8 +66,9 @@ impl OutputWriter {
                 }
 
                 let line = format!(
-                    "{}\t{}\t{}\t{:13.9}\t{:13.9}\t{}\t{}",
+                    "{}\t{:13.9}\t{}\t{}\t{:13.9}\t{:13.9}\t{}\t{}",
                     count,
+                    burst.completion_time,
                     burst.src,
                     burst.dst,
                     burst.start,
