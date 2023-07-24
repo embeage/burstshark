@@ -14,17 +14,19 @@ pub struct OutputWriter {
     min_bytes: Option<u32>,
     max_bytes: Option<u32>,
     min_packets: Option<u16>,
+    start_time: Option<f64>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl OutputWriter {
-    pub fn new(outfile: Option<String>, suppress: bool, min_bytes: Option<u32>, max_bytes: Option<u32>, min_packets: Option<u16>) -> Self {
+    pub fn new(outfile: Option<String>, suppress: bool, min_bytes: Option<u32>, max_bytes: Option<u32>, min_packets: Option<u16>, start_time: Option<f64>) -> Self {
         OutputWriter {
             outfile: outfile,
             suppress: suppress,
             min_bytes: min_bytes,
             max_bytes: max_bytes,
             min_packets: min_packets,
+            start_time: start_time,
             handle: None,
         }
     }
@@ -42,6 +44,7 @@ impl OutputWriter {
         let min_bytes = self.min_bytes;
         let max_bytes = self.max_bytes;
         let min_packets = self.min_packets;
+        let start_time = self.start_time;
 
         self.handle = Some(thread::spawn(move || {
             let mut count = 1;
@@ -57,6 +60,7 @@ impl OutputWriter {
                 if (min_bytes.map_or(false, |min| min > burst.size))
                     || (max_bytes.map_or(false, |max| max < burst.size))
                     || (min_packets.map_or(false, |min| min > burst.num_packets))
+                    || (start_time.map_or(false, |start| start > burst.start))
                 {
                     continue;
                 }

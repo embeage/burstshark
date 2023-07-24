@@ -17,7 +17,9 @@ Each output line contains the following information:
 ## Usage
 The full options of BurstShark can be seen below.
 
-```shell
+```
+$ burstshark -h
+
 BurstShark is a network traffic analysis tool that wraps around tshark to identify and analyze bursty application data traffic, such as adaptive streaming, in real-time or from pcap files.
 
 Usage: burstshark [OPTIONS]
@@ -35,6 +37,7 @@ Options:
   -b, --min-bytes <MIN_BYTES> Only show bursts with a minimum amount of bytes
   -B, --max-bytes <MAX_BYTES> Only show bursts with a maximum amount of bytes
   -P, --min-packets <MIN_PACKETS> Only show bursts with a minimum amount of packets/frames
+  -A, --start-time <START_TIME> Only show bursts that started after time relative to the first packet/frame
   -G, --no-guess Disable guessing sizes of WLAN data frames missed by the monitor mode device
   -M, --max-deviation <MAX_DEVIATION> Maximum allowed deviation from the expected sequence number for WLAN frames [default: 50]
   -h, --help Print help (see more with '--help')

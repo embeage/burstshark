@@ -57,6 +57,10 @@ struct Args {
     #[clap(short = 'P', long = "min-packets")]
     min_packets: Option<u16>,
 
+    /// Only show bursts that started after time relative to the first packet/frame.
+    #[clap(short = 'A', long = "start-time")]
+    start_time: Option<f64>,
+
     /// Disable guessing sizes of WLAN data frames missed by the monitor mode device.
     #[clap(short = 'G', long = "no-guess")]
     no_guess: bool,
@@ -244,6 +248,7 @@ fn main() {
         args.min_bytes,
         args.max_bytes,
         args.min_packets,
+        args.start_time,
     );
 
     let tx = match output_writer.start() {
