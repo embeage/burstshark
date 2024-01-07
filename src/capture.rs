@@ -21,6 +21,8 @@ pub struct Burst {
     pub completion_time: f64,
     pub src: String,
     pub dst: String,
+    pub src_port: Option<u16>,
+    pub dst_port: Option<u16>,
     pub start: f64,
     pub end: f64,
     pub num_packets: u16,
@@ -36,6 +38,7 @@ pub struct CommonOptions {
 pub enum CaptureType {
     IPCapture {
         opts: CommonOptions,
+        ignore_ports: bool,
     },
     WLANCapture {
         opts: CommonOptions,
@@ -47,7 +50,7 @@ pub enum CaptureType {
 impl CaptureType {
     pub fn run(&self) -> Result<(), Box<dyn Error>> {
         let opts = match self {
-            CaptureType::IPCapture { opts } | CaptureType::WLANCapture { opts, .. } => opts,
+            CaptureType::IPCapture { opts, .. } | CaptureType::WLANCapture { opts, .. } => opts,
         };
 
         let mut tshark = Command::new("tshark")
@@ -70,16 +73,21 @@ impl CaptureType {
         let reader = std::io::BufReader::new(stdout);
 
         match self {
-            CaptureType::IPCapture { .. } => {
-                let mut flows: HashMap<(IpAddr, IpAddr), IpFlow> = HashMap::new();
+            CaptureType::IPCapture { ignore_ports, .. } => {
+                let mut flows: HashMap<(IpAddr, IpAddr, Option<u16>, Option<u16>), IpFlow> = HashMap::new();
                 for line in reader.lines() {
                     let packet = match IpPacket::from_tshark(&line.unwrap()) {
                         Ok(packet) => packet,
                         Err(_) => continue,
                     };
+                    let flow_key = if *ignore_ports {
+                        (packet.src, packet.dst, None, None)
+                    } else {
+                        (packet.src, packet.dst, Some(packet.src_port), Some(packet.dst_port))
+                    };
                     flows
-                        .entry((packet.src, packet.dst))
-                        .or_insert_with(|| IpFlow::new(&packet, opts.inactive_time))
+                        .entry(flow_key)
+                        .or_insert_with(|| IpFlow::new(&packet, opts.inactive_time, *ignore_ports))
                         .add_packet(&packet, &opts.tx);
                 }
             }
@@ -104,14 +112,16 @@ impl CaptureType {
 }
 
 struct IpPacket {
-    time_relative: f64,
+    time: f64,
     src: IpAddr,
     dst: IpAddr,
+    src_port: u16,
+    dst_port: u16,
     data_len: u32,
 }
 
 struct WlanPacket {
-    time_relative: f64,
+    time: f64,
     src: MacAddr,
     dst: MacAddr,
     data_len: u32,
@@ -120,8 +130,8 @@ struct WlanPacket {
 
 struct IpFlow {
     inactive_time: f64,
+    ignore_ports: bool,
     current_burst: Burst,
-
 }
 
 struct WlanFlow {
@@ -135,11 +145,13 @@ struct WlanFlow {
 
 impl IpPacket {
     fn from_tshark(line: &str) -> Result<Self, Box<dyn Error>> {
-        let mut fields = line.splitn(4, |c: char| c.is_ascii_whitespace());
+        let mut fields = line.split_whitespace();
         Ok(IpPacket {
-            time_relative: fields.next().unwrap().parse::<f64>()?,
+            time: fields.next().unwrap().parse::<f64>()?,
             src: IpAddr::from_str(fields.next().unwrap())?,
             dst: IpAddr::from_str(fields.next().unwrap())?,
+            src_port: fields.next().unwrap().parse::<u16>()?,
+            dst_port: fields.next().unwrap().parse::<u16>()?,
             data_len: fields.next().unwrap().parse::<u32>()?,
         })
     }
@@ -147,9 +159,9 @@ impl IpPacket {
 
 impl WlanPacket {
     fn from_tshark(line: &str) -> Result<Self, Box<dyn Error>> {
-        let mut fields = line.splitn(5, |c: char| c.is_ascii_whitespace());
+        let mut fields = line.split_whitespace();
         Ok(WlanPacket {
-            time_relative: fields.next().unwrap().parse::<f64>()?,
+            time: fields.next().unwrap().parse::<f64>()?,
             src: MacAddr::from_str(fields.next().unwrap())?,
             dst: MacAddr::from_str(fields.next().unwrap())?,
             data_len: fields.next().unwrap().parse::<u32>()?,
@@ -159,25 +171,21 @@ impl WlanPacket {
 }
 
 impl IpFlow {
-    fn new(p: &IpPacket, inactive_time: f64) -> Self {
+    fn new(p: &IpPacket, inactive_time: f64, ignore_ports: bool) -> Self {
         IpFlow {
-            inactive_time: inactive_time,
-            current_burst: Burst::new(
-                p.time_relative,
-                p.src.to_string(),
-                p.dst.to_string(),
-                p.data_len,
-            ),
+            inactive_time,
+            ignore_ports,
+            current_burst: Burst::from_ip_packet(p, ignore_ports),
         }
     }
 
     fn add_packet(&mut self, p: &IpPacket, tx: &Sender<Burst>) {
-        if p.time_relative - self.current_burst.end > self.inactive_time {
-            self.current_burst.completion_time = p.time_relative;
+        if p.time - self.current_burst.end > self.inactive_time {
+            self.current_burst.completion_time = p.time;
             tx.send(self.current_burst.clone()).unwrap();
-            self.current_burst = Burst::new(p.time_relative, p.src.to_string(), p.dst.to_string(), p.data_len);
+            self.current_burst = Burst::from_ip_packet(p, self.ignore_ports);
         } else {
-            self.current_burst.end = p.time_relative;
+            self.current_burst.end = p.time;
             self.current_burst.num_packets += 1;
             self.current_burst.size += p.data_len;
         }
@@ -187,25 +195,20 @@ impl IpFlow {
 impl WlanFlow {
     fn new(p: &WlanPacket, inactive_time: f64, no_guess: bool, max_deviation: u16) -> Self {
         WlanFlow {
-            inactive_time: inactive_time,
-            current_burst: Burst::new(
-                p.time_relative,
-                p.src.to_string(),
-                p.dst.to_string(),
-                p.data_len,
-            ),
+            inactive_time,
+            current_burst: Burst::from_wlan_packet(p),
             expected_seq_number: p.seq_number,
             last_packet_len: p.data_len,
-            no_guess: no_guess,
-            max_deviation: max_deviation,
+            no_guess,
+            max_deviation,
         }
     }
 
     fn add_packet(&mut self, p: &WlanPacket, tx: &Sender<Burst>) {
-        if p.time_relative - self.current_burst.end > self.inactive_time {
-            self.current_burst.completion_time = p.time_relative;
+        if p.time - self.current_burst.end > self.inactive_time {
+            self.current_burst.completion_time = p.time;
             tx.send(self.current_burst.clone()).unwrap();
-            self.current_burst = Burst::new(p.time_relative, p.src.to_string(), p.dst.to_string(), p.data_len);
+            self.current_burst = Burst::from_wlan_packet(p);
             
             // Accept sequence number of packet after the inactive time.
             self.expected_seq_number = (p.seq_number + 1) & 4095;
@@ -215,7 +218,7 @@ impl WlanFlow {
             if p.seq_number == self.expected_seq_number {
                 self.expected_seq_number = (p.seq_number + 1) & 4095;
                 self.last_packet_len = p.data_len;
-                self.current_burst.end = p.time_relative;
+                self.current_burst.end = p.time;
                 self.current_burst.num_packets += 1;
                 self.current_burst.size += p.data_len;
                 return
@@ -228,7 +231,7 @@ impl WlanFlow {
             // We already added this packet, but it is probably being retransmitted.
             // Note: not enough to filter on the retransmission bit as the first frame might be lost.
             if -(self.max_deviation as i16) < signed_diff && signed_diff < 0 {
-                self.current_burst.end = p.time_relative;
+                self.current_burst.end = p.time;
                 return
             }
 
@@ -248,7 +251,7 @@ impl WlanFlow {
                 // Bring the expected sequence number in line with the packet.
                 self.expected_seq_number = (p.seq_number + 1) & 4095;
                 self.last_packet_len = p.data_len;
-                self.current_burst.end = p.time_relative;
+                self.current_burst.end = p.time;
             } else {
                 // In case of a larger deviation, might be a single outlier, go to next expected.
                 self.expected_seq_number = (self.expected_seq_number + 1) & 4095;
@@ -258,15 +261,35 @@ impl WlanFlow {
 }
 
 impl Burst {
-    fn new(time: f64, src: String, dst: String, init_size: u32) -> Self {
+    fn from_ip_packet(p: &IpPacket, ignore_ports: bool) -> Self {
+        let (src_port, dst_port) = if ignore_ports {
+            (None, None)
+        } else {
+            (Some(p.src_port), Some(p.dst_port))
+        };
         Burst {
-            completion_time: time,
-            src: src,
-            dst: dst,
-            start: time,
-            end: time,
+            completion_time: p.time,
+            src: p.src.to_string(),
+            dst: p.dst.to_string(),
+            src_port,
+            dst_port,
+            start: p.time,
+            end: p.time,
             num_packets: 1,
-            size: init_size,
+            size: p.data_len,
+        }
+    }
+    fn from_wlan_packet(p: &WlanPacket) -> Self {
+        Burst {
+            completion_time: p.time,
+            src: p.src.to_string(),
+            dst: p.dst.to_string(),
+            src_port: None,
+            dst_port: None,
+            start: p.time,
+            end: p.time,
+            num_packets: 1,
+            size: p.data_len,
         }
     }
 }

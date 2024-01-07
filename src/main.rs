@@ -10,7 +10,7 @@ use output::OutputWriter;
 #[clap(author, version, about)]
 struct Args {
     /// Protocol to run BurstShark on.
-    #[clap(value_enum, short = 'p', long = "protocol", default_value = "tcp")]
+    #[clap(value_enum, short = 'p', long = "protocol", default_value_t = Protocol::Ip)]
     protocol: Protocol,
 
     /// Read packet data from infile.
@@ -24,15 +24,19 @@ struct Args {
     /// Seconds with no activity to consider a new burst.
     #[clap(short = 't', long = "inactive-time", default_value_t = 1.0)]
     inactive_time: f64,
-    
-    /// One or more space separated source addresses to filter on.
-    #[clap(short = 's', long = "src", value_parser, num_args = 1.., value_delimiter = ' ')]
-    src: Option<Vec<String>>,
-    
-    /// One or more space separated destination addresses to filter on.
-    #[clap(short = 'd', long = "dst", value_parser, num_args = 1.., value_delimiter = ' ')]
-    dst: Option<Vec<String>>,
-    
+
+    /// Ignore ports when using IP protocol and create bursts based on IP addresses only.
+    #[clap(short = 'I', long = "ignore-ports")]
+    ignore_ports: bool,
+
+    /// Capture filter using BPF syntax. Merged with default that filters for application data packets.
+    #[clap(short = 'f', long = "capture-filter")]
+    capture_filter: Option<String>,
+
+    /// Display filter. Merged with default that filters for application data packets.
+    #[clap(short = 'Y', long = "display-filter")]
+    display_filter: Option<String>,
+
     /// Write captured packets by tshark to a capture file.
     #[clap(short = 'w', long = "write-capture")]
     capture_outfile: Option<String>,
@@ -41,23 +45,31 @@ struct Args {
     #[clap(short = 'W', long = "write-bursts")]
     bursts_outfile: Option<String>,
 
-    /// Don't show any bursts on the standard output.
+    /// Don't display bursts on the standard output.
     #[clap(short = 'q', long = "suppress")]
     suppress: bool,
 
-    /// Only show bursts with a minimum amount of bytes.
+    /// Only display bursts with a minimum amount of bytes.
     #[clap(short = 'b', long = "min-bytes")]
     min_bytes: Option<u32>,
 
-    /// Only show bursts with a maximum amount of bytes.
+    /// Only display bursts with a maximum amount of bytes.
     #[clap(short = 'B', long = "max-bytes")]
     max_bytes: Option<u32>,
 
-    /// Only show bursts with a minimum amount of packets/frames.
-    #[clap(short = 'P', long = "min-packets")]
+    /// Only display bursts with a minimum amount of packets/frames.
+    #[clap(short = 'n', long = "min-packets")]
     min_packets: Option<u16>,
 
-    /// Only show bursts that started after time relative to the first packet/frame.
+    /// Only display bursts with a maximum amount of packets/frames.
+    #[clap(short = 'N', long = "max-packets")]
+    max_packets: Option<u16>,
+
+    /// Which time format to use for output.
+    #[clap(value_enum, short = 'T', long = "time-format", default_value_t = TimeFormat::Relative)]
+    time_format: TimeFormat,
+
+    /// Only display bursts that started after time relative to the first packet/frame.
     #[clap(short = 'A', long = "start-time")]
     start_time: Option<f64>,
 
@@ -71,11 +83,17 @@ struct Args {
 }
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
-enum Protocol {
-    /// Run BurstShark on TCP application data segments.
-    Tcp,
+enum TimeFormat {
+    /// Time relative to the first packet/frame.
+    Relative,
 
-    /// Run BurstShark on IPv4 or IPv6 packets.
+    /// Time in seconds since the UNIX epoch.
+    Epoch,
+}
+
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+enum Protocol {
+    /// Run BurstShark on TCP and UDP application data.
     Ip,
 
     /// Run BurstShark on IEEE 802.11 data frames, typically using monitor mode.
@@ -84,8 +102,23 @@ enum Protocol {
 
 
 fn tshark_args(args: Args) -> Vec<String> {
-    let capture_filter = capture_filter(&args.protocol, &args.src, &args.dst);
-    let display_filter = display_filter(&args.protocol, &args.src, &args.dst);
+    let mut capture_filter = match args.protocol {
+        Protocol::Ip => String::from("udp or tcp and (((ip[2:2] - ((ip[0]&0xf)<<2)) - ((tcp[12]&0xf0)>>2)) != 0)"),
+        Protocol::Wlan => String::from("wlan type data subtype qos-data"),
+    };
+
+    if let Some(filter) = args.capture_filter {
+        capture_filter = format!("({}) and ({})", capture_filter, filter);
+    }
+
+    let mut display_filter = match args.protocol {
+        Protocol::Ip => String::from("udp || tcp && tcp.len > 0"),
+        Protocol::Wlan => String::from("wlan && wlan.fc.type_subtype == 40"),
+    };
+
+    if let Some(filter) = args.display_filter {
+        display_filter = format!("({}) && ({})", display_filter, filter);
+    }
 
     let mut tshark_args = match (&args.infile, &args.interface, &args.capture_outfile) {
         (Some(infile), _, _) => vec![
@@ -121,24 +154,28 @@ fn tshark_args(args: Args) -> Vec<String> {
         ],
     };
 
+    let time_format_field = match args.time_format {
+        TimeFormat::Relative => "frame.time_relative",
+        TimeFormat::Epoch => "frame.time_epoch",
+    };
+
     tshark_args.extend(match args.protocol {
-        Protocol::Tcp => vec![
-            "-T", "fields",
-            "-e", "frame.time_relative",
-            "-e", "ip.src",
-            "-e", "ip.dst",
-            "-e", "tcp.len",
-        ],
         Protocol::Ip => vec![
             "-T", "fields",
-            "-e", "frame.time_relative",
+            "-e", time_format_field,
             "-e", "ip.src",
             "-e", "ip.dst",
-            "-e", "ip.len",
+            "-e", "udp.srcport",
+            "-e", "tcp.srcport",
+            "-e", "udp.dstport",
+            "-e", "tcp.dstport",
+            "-e", "data.len",
+            "-e", "udp.length",
+            "-e", "tcp.len",
         ],
         Protocol::Wlan => vec![
             "-T", "fields",
-            "-e", "frame.time_relative",
+            "-e", time_format_field,
             "-e", "wlan.sa",
             "-e", "wlan.da",
             "-e", "data.len",
@@ -147,96 +184,6 @@ fn tshark_args(args: Args) -> Vec<String> {
     });
 
     tshark_args.into_iter().map(str::to_string).collect()
-}
-
-fn capture_filter(protocol: &Protocol, src: &Option<Vec<String>>, dst: &Option<Vec<String>>) -> String {
-    match protocol {
-        Protocol::Tcp => {
-            let default = "tcp and (((ip[2:2] - ((ip[0]&0xf)<<2)) - ((tcp[12]&0xf0)>>2)) != 0)";
-            extend_filter(
-                &extend_filter(
-                    default, 
-                    "ip src", 
-                    src), 
-                "ip dst",
-                dst
-            )
-        },
-        Protocol::Ip => {    
-            let default = "(ip or ip6) and (tcp or udp)";
-            extend_filter(
-                &extend_filter(
-                    default, 
-                    "ip src", 
-                    src), 
-                "ip dst",
-                dst
-            )
-        },
-        Protocol::Wlan => {    
-            let default = "wlan type data subtype qos-data";
-            extend_filter(
-                &extend_filter(
-                    default, 
-                    "wlan src", 
-                    src), 
-                "wlan dst",
-                dst
-            )
-        },
-    }
-}
-
-fn display_filter(protocol: &Protocol, src: &Option<Vec<String>>, dst: &Option<Vec<String>>) -> String {
-    match protocol {
-        Protocol::Tcp => {
-            let default = "tcp and tcp.len > 0";
-            extend_filter(
-                &extend_filter(
-                    default, 
-                    "ip.src ==", 
-                    src), 
-                "ip.dst ==",
-                dst
-            )
-        },
-        Protocol::Ip => {    
-            let default = "(ip or ipv6) and (tcp or udp)";
-            extend_filter(
-                &extend_filter(
-                    default, 
-                    "ip.src ==", 
-                    src), 
-                "ip.dst ==",
-                dst
-            )
-        },
-        Protocol::Wlan => {    
-            let default = "wlan and wlan.fc.type_subtype == 40";
-            extend_filter(
-                &extend_filter(
-                    default, 
-                    "wlan.sa ==", 
-                    src), 
-                "wlan.da ==",
-                dst
-            )
-        },
-    }
-}
-
-fn extend_filter(filter: &str, field: &str, addresses: &Option<Vec<String>>) -> String {
-    match addresses {
-        Some(adr) => {
-            let extended: Vec<String> = adr
-                .iter()
-                .map(|address| format!("{} {}", field, address))
-                .collect();
-
-            format!("({}) and ({})", filter, extended.join(" or "))
-        }
-        None => filter.to_string(),
-    }
 }
 
 fn main() {
@@ -248,6 +195,7 @@ fn main() {
         args.min_bytes,
         args.max_bytes,
         args.min_packets,
+        args.max_packets,
         args.start_time,
     );
 
@@ -262,11 +210,11 @@ fn main() {
     let opts = CommonOptions {
         tshark_args: tshark_args(args.clone()),
         inactive_time: args.inactive_time,
-        tx: tx
+        tx
     };
 
     let capture_result = match args.protocol {
-        Protocol::Tcp | Protocol::Ip => CaptureType::IPCapture { opts }.run(),
+        Protocol::Ip => CaptureType::IPCapture { opts, ignore_ports: args.ignore_ports }.run(),
         Protocol::Wlan => CaptureType::WLANCapture { opts, no_guess: args.no_guess, max_deviation: args.max_deviation }.run(),
     };
 
