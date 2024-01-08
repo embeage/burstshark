@@ -112,7 +112,7 @@ fn tshark_args(args: Args) -> Vec<String> {
     }
 
     let mut display_filter = match args.protocol {
-        Protocol::Ip => String::from("udp || tcp && tcp.len > 0"),
+        Protocol::Ip => String::from("udp || (tcp && tcp.len > 0)"),
         Protocol::Wlan => String::from("wlan && wlan.fc.type_subtype == 40"),
     };
 
