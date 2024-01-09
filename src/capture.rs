@@ -15,7 +15,7 @@ use std::{
 use macaddr::MacAddr;
 use nix::sys::signal;
 use ctrlc;
- 
+
 #[derive(Debug, Clone)]
 pub struct Burst {
     pub completion_time: f64,

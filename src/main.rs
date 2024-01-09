@@ -9,33 +9,29 @@ use output::OutputWriter;
 #[derive(Parser, Clone, Debug)]
 #[clap(author, version, about)]
 struct Args {
-    /// Protocol to run BurstShark on.
-    #[clap(value_enum, short = 'p', long = "protocol", default_value_t = Protocol::Ip)]
-    protocol: Protocol,
-
-    /// Read packet data from infile.
-    #[clap(short = 'r', long = "read-file")]
-    infile: Option<String>,
-    
     /// Network interface to use for live capture. First non-loopback interface if no interface or file supplied.
     #[clap(short = 'i', long = "interface")]
     interface: Option<String>,
+
+    /// Read packet data from infile.
+    #[clap(short = 'r', long = "read-file", conflicts_with = "interface")]
+    infile: Option<String>,
+
+    /// Packet filter in libpcap filter syntax. Merged with default for data packets.
+    #[clap(short = 'f', long = "capture-filter", conflicts_with = "infile")]
+    capture_filter: Option<String>,
+
+    /// Packet filter in Wireshark display filter syntax. Merged with default for data packets.
+    #[clap(short = 'Y', long = "display-filter", requires = "infile")]
+    display_filter: Option<String>,
     
     /// Seconds with no activity to consider a new burst.
     #[clap(short = 't', long = "inactive-time", default_value_t = 1.0)]
     inactive_time: f64,
 
-    /// Ignore ports when using IP protocol and create bursts based on IP addresses only.
-    #[clap(short = 'I', long = "ignore-ports")]
+    /// Ignore ports when and create bursts based on IP addresses only.
+    #[clap(short = 'p', long = "ignore-ports", conflicts_with = "monitor_mode")]
     ignore_ports: bool,
-
-    /// Capture filter using BPF syntax. Merged with default that filters for application data packets.
-    #[clap(short = 'f', long = "capture-filter")]
-    capture_filter: Option<String>,
-
-    /// Display filter. Merged with default that filters for application data packets.
-    #[clap(short = 'Y', long = "display-filter")]
-    display_filter: Option<String>,
 
     /// Write captured packets by tshark to a capture file.
     #[clap(short = 'w', long = "write-capture")]
@@ -69,17 +65,20 @@ struct Args {
     #[clap(value_enum, short = 'T', long = "time-format", default_value_t = TimeFormat::Relative)]
     time_format: TimeFormat,
 
-    /// Only display bursts that started after time relative to the first packet/frame.
-    #[clap(short = 'A', long = "start-time")]
-    start_time: Option<f64>,
+    /// Capture 802.11 WLAN frames instead of IP packets.
+    #[clap(short = 'I', long = "monitor-mode")]
+    monitor_mode: bool,
 
     /// Disable guessing sizes of WLAN data frames missed by the monitor mode device.
-    #[clap(short = 'G', long = "no-guess")]
+    #[clap(short = 'G', long = "no-guess", requires = "monitor_mode")]
     no_guess: bool,
 
     /// Maximum allowed deviation from the expected sequence number for WLAN frames.
-    #[clap(short = 'M', long = "max-deviation", default_value_t = 50)]
+    #[clap(short = 'M', long = "max-deviation", default_value_t = 50, requires = "monitor_mode")]
     max_deviation: u16,
+
+    #[clap(value_delimiter=' ', hide(true), conflicts_with_all(["capture_filter", "display_filter"]))]
+    positional_filter: Option<Vec<String>>,
 }
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
@@ -93,76 +92,60 @@ enum TimeFormat {
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 enum Protocol {
-    /// Run BurstShark on TCP and UDP application data.
     Ip,
-
-    /// Run BurstShark on IEEE 802.11 data frames, typically using monitor mode.
     Wlan,
 }
 
-
-fn tshark_args(args: Args) -> Vec<String> {
-    let mut capture_filter = match args.protocol {
-        Protocol::Ip => String::from("udp or tcp and (((ip[2:2] - ((ip[0]&0xf)<<2)) - ((tcp[12]&0xf0)>>2)) != 0)"),
-        Protocol::Wlan => String::from("wlan type data subtype qos-data"),
+fn tshark_args(protocol: &Protocol, args: Args) -> Vec<String> {
+    let default_filter = match (&args.infile, &args.monitor_mode) {
+        (None, false) => String::from("udp or (tcp and (((ip[2:2] - ((ip[0]&0xf)<<2)) - ((tcp[12]&0xf0)>>2)) != 0))"),
+        (None, true) => String::from("wlan type data subtype qos-data"),
+        (Some(_), false) => String::from("udp or (tcp and tcp.len > 0)"),
+        (Some(_), true) => String::from("wlan and wlan.fc.type_subtype == 40"),
     };
 
-    if let Some(filter) = args.capture_filter {
-        capture_filter = format!("({}) and ({})", capture_filter, filter);
-    }
+    let optional_filter = args.capture_filter.or(args.display_filter);
+    let supplied_filter = optional_filter.or(args.positional_filter.map(|f| f.join(" ")));
 
-    let mut display_filter = match args.protocol {
-        Protocol::Ip => String::from("udp || (tcp && tcp.len > 0)"),
-        Protocol::Wlan => String::from("wlan && wlan.fc.type_subtype == 40"),
+    let filter = match supplied_filter{
+        Some(filter) => format!("({}) and ({})", default_filter, filter),
+        None => default_filter,
     };
 
-    if let Some(filter) = args.display_filter {
-        display_filter = format!("({}) && ({})", display_filter, filter);
-    }
-
-    let mut tshark_args = match (&args.infile, &args.interface, &args.capture_outfile) {
-        (Some(infile), _, _) => vec![
+    let mut tshark_args = match &args.infile {
+        Some(infile) => vec![
             "-r", infile, 
-            "-Y", &display_filter,
-            "-Q",
+            "-Y", &filter,
         ],
-        (_, Some(interface), Some(capture_outfile)) => vec![
+        None => vec![
             "-n",
-            "-i", interface,
-            "-f", &capture_filter,
-            "-w", capture_outfile,
-            "-P",
-            "-Q",
-        ],
-        (_, Some(interface), _) => vec![
-            "-n",
-            "-i", interface,
-            "-f", &capture_filter,
-            "-Q",
-        ],
-        (_, _, Some(capture_outfile)) => vec![
-            "-n",
-            "-f", &capture_filter,
-            "-w", capture_outfile,
-            "-P",
-            "-Q",
-        ],
-        _ => vec![
-            "-n",
-            "-f", &capture_filter,
-            "-Q",
+            "-f", &filter,
         ],
     };
 
-    let time_format_field = match args.time_format {
-        TimeFormat::Relative => "frame.time_relative",
-        TimeFormat::Epoch => "frame.time_epoch",
-    };
+    if let Some(interface) = &args.interface {
+        tshark_args.extend(vec!["-i", interface]);
+    }
 
-    tshark_args.extend(match args.protocol {
+    if let Some(capture_outfile) = &args.capture_outfile {
+        tshark_args.extend(vec![
+            "-w", capture_outfile,
+            "-P",
+        ]);
+    }
+
+    tshark_args.extend(vec![
+        "-Q",
+        "-l",
+        "-T", "fields",
+        "-e", match args.time_format {
+            TimeFormat::Relative => "frame.time_relative",
+            TimeFormat::Epoch => "frame.time_epoch",
+        },
+    ]);
+
+    tshark_args.extend(match protocol {
         Protocol::Ip => vec![
-            "-T", "fields",
-            "-e", time_format_field,
             "-e", "ip.src",
             "-e", "ip.dst",
             "-e", "udp.srcport",
@@ -174,8 +157,6 @@ fn tshark_args(args: Args) -> Vec<String> {
             "-e", "tcp.len",
         ],
         Protocol::Wlan => vec![
-            "-T", "fields",
-            "-e", time_format_field,
             "-e", "wlan.sa",
             "-e", "wlan.da",
             "-e", "data.len",
@@ -188,6 +169,10 @@ fn tshark_args(args: Args) -> Vec<String> {
 
 fn main() {
     let args: Args = Args::parse();
+    let protocol = match args.monitor_mode {
+        true => Protocol::Wlan,
+        false => Protocol::Ip,
+    };
 
     let mut output_writer = OutputWriter::new(
         args.bursts_outfile.clone(),
@@ -196,7 +181,6 @@ fn main() {
         args.max_bytes,
         args.min_packets,
         args.max_packets,
-        args.start_time,
     );
 
     let tx = match output_writer.start() {
@@ -208,12 +192,12 @@ fn main() {
     };
 
     let opts = CommonOptions {
-        tshark_args: tshark_args(args.clone()),
+        tshark_args: tshark_args(&protocol, args.clone()),
         inactive_time: args.inactive_time,
         tx
     };
 
-    let capture_result = match args.protocol {
+    let capture_result = match protocol {
         Protocol::Ip => CaptureType::IPCapture { opts, ignore_ports: args.ignore_ports }.run(),
         Protocol::Wlan => CaptureType::WLANCapture { opts, no_guess: args.no_guess, max_deviation: args.max_deviation }.run(),
     };

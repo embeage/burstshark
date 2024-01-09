@@ -1,9 +1,10 @@
 use std::{
     error::Error,
     fs::File,
-    io::Write,
+    io::{Write, BufWriter},
     sync::mpsc,
     thread,
+    fmt::Write as FmtWrite,
 };
 
 use crate::capture::Burst;
@@ -15,12 +16,11 @@ pub struct OutputWriter {
     max_bytes: Option<u32>,
     min_packets: Option<u16>,
     max_packets: Option<u16>,
-    start_time: Option<f64>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl OutputWriter {
-    pub fn new(outfile: Option<String>, suppress: bool, min_bytes: Option<u32>, max_bytes: Option<u32>, min_packets: Option<u16>, max_packets: Option<u16>, start_time: Option<f64>) -> Self {
+    pub fn new(outfile: Option<String>, suppress: bool, min_bytes: Option<u32>, max_bytes: Option<u32>, min_packets: Option<u16>, max_packets: Option<u16>) -> Self {
         OutputWriter {
             outfile,
             suppress,
@@ -28,7 +28,6 @@ impl OutputWriter {
             max_bytes,
             min_packets,
             max_packets,
-            start_time,
             handle: None,
         }
     }
@@ -36,8 +35,7 @@ impl OutputWriter {
     pub fn start(&mut self) -> Result<mpsc::Sender<Burst>, Box<dyn Error>> {
         let (tx, rx) = mpsc::channel();
 
-        // Create new file if outfile is supplied.
-        let mut file = match &self.outfile {
+        let file = match &self.outfile {
             Some(filename) => Some(File::create(filename)?),
             None => None,
         };
@@ -47,10 +45,14 @@ impl OutputWriter {
         let max_bytes = self.max_bytes;
         let min_packets = self.min_packets;
         let max_packets = self.max_packets;
-        let start_time = self.start_time;
 
         self.handle = Some(thread::spawn(move || {
+            let mut line = String::with_capacity(256);
             let mut count = 1;
+            let mut buffer = match file {
+                Some(file) => Some(BufWriter::new(file)),
+                None => None,
+            };
 
             loop {
                 let burst: Burst = match rx.recv() {
@@ -64,31 +66,32 @@ impl OutputWriter {
                     || (max_bytes.map_or(false, |max| max <= burst.size))
                     || (min_packets.map_or(false, |min| min >= burst.num_packets))
                     || (max_packets.map_or(false, |max| max <= burst.num_packets))
-                    || (start_time.map_or(false, |start| start > burst.start))
                 {
                     continue;
                 }
 
-                let line = format!(
-                    "{}\t{:13.9}\t{}\t{}\t{}\t{}\t{:13.9}\t{:13.9}\t{}\t{}",
+                line.clear();
+                write!(
+                    &mut line,
+                    "{:5} {:13.9} {:15} {:6} {:15} {:5} {:13.9} {:13.9} {:4} {}",
                     count,
                     burst.completion_time,
                     burst.src,
-                    burst.dst,
                     burst.src_port.map_or("".to_string(), |p| p.to_string()),
+                    burst.dst,
                     burst.dst_port.map_or("".to_string(), |p| p.to_string()),
                     burst.start,
                     burst.end,
                     burst.num_packets,
                     burst.size,
-                );  
-        
+                ).expect("Error writing to line");
+
                 if !suppress {
                     println!("{}", line);
                 }
     
-                if let Some(ref mut file) = file {
-                    writeln!(file, "{}", line).expect("Error writing to file");
+                if let Some(buffer) = &mut buffer {
+                    writeln!(buffer, "{}", line).expect("Error writing to file");
                 }
 
                 count += 1;

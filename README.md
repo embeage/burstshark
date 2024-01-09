@@ -9,8 +9,8 @@ Each output line contains the following information:
 * Burst counter (incremental)
 * Completion time of the burst (relative or epoch time)
 * Source IP or MAC address
-* Destination IP or MAC address
 * Source port (or empty no port)
+* Destination IP or MAC address
 * Destination port (or empty if no port)
 * Start time of the burst (relative or epoch time)
 * End time of the burst (relative or epoch time)
@@ -28,20 +28,18 @@ BurstShark is a network traffic analysis tool that wraps around tshark to identi
 Usage: burstshark [OPTIONS]
 
 Options:
-  -p, --protocol <PROTOCOL>
-          Protocol to run BurstShark on [default: ip] [possible values: ip, wlan]
-  -r, --read-file <INFILE>
-          Read packet data from infile
   -i, --interface <INTERFACE>
           Network interface to use for live capture. First non-loopback interface if no interface or file supplied
+  -r, --read-file <INFILE>
+          Read packet data from infile
+  -f, --capture-filter <CAPTURE_FILTER>
+          Packet filter in libpcap filter syntax. Merged with default for data packets
+  -Y, --display-filter <DISPLAY_FILTER>
+          Packet filter in Wireshark display filter syntax. Merged with default for data packets
   -t, --inactive-time <INACTIVE_TIME>
           Seconds with no activity to consider a new burst [default: 1]
-  -I, --ignore-ports
-          Ignore ports when using IP protocol and create bursts based on IP addresses only
-  -f, --capture-filter <CAPTURE_FILTER>
-          Capture filter using BPF syntax. Merged with default that filters for application data packets
-  -Y, --display-filter <DISPLAY_FILTER>
-          Display filter. Merged with default that filters for application data packets
+  -p, --ignore-ports
+          Ignore ports when and create bursts based on IP addresses only
   -w, --write-capture <CAPTURE_OUTFILE>
           Write captured packets by tshark to a capture file
   -W, --write-bursts <BURSTS_OUTFILE>
@@ -58,8 +56,8 @@ Options:
           Only display bursts with a maximum amount of packets/frames
   -T, --time-format <TIME_FORMAT>
           Which time format to use for output [default: relative] [possible values: relative, epoch]
-  -A, --start-time <START_TIME>
-          Only display bursts that started after time relative to the first packet/frame
+  -I, --monitor-mode
+          Capture 802.11 WLAN frames instead of IP packets
   -G, --no-guess
           Disable guessing sizes of WLAN data frames missed by the monitor mode device
   -M, --max-deviation <MAX_DEVIATION>
