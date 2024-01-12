@@ -87,8 +87,8 @@ impl CaptureType {
                     };
                     flows
                         .entry(flow_key)
-                        .or_insert_with(|| IpFlow::new(&packet, opts.inactive_time, *ignore_ports))
-                        .add_packet(&packet, &opts.tx);
+                        .and_modify(|flow| flow.add_packet(&packet, &opts.tx))
+                        .or_insert_with(|| IpFlow::new(&packet, opts.inactive_time, *ignore_ports));
                 }
             }
             CaptureType::WLANCapture { no_guess , max_deviation, .. } => {
@@ -100,8 +100,8 @@ impl CaptureType {
                     };
                     flows
                         .entry((packet.src, packet.dst))
-                        .or_insert_with(|| WlanFlow::new(&packet, opts.inactive_time, *no_guess, *max_deviation))
-                        .add_packet(&packet, &opts.tx);
+                        .and_modify(|flow| flow.add_packet(&packet, &opts.tx))
+                        .or_insert_with(|| WlanFlow::new(&packet, opts.inactive_time, *no_guess, *max_deviation));
                 }
             }
         }
