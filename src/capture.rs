@@ -7,14 +7,14 @@ use std::{
     str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
         mpsc::Sender,
+        Arc,
     },
 };
 
+use ctrlc;
 use macaddr::MacAddr;
 use nix::sys::signal;
-use ctrlc;
 
 #[derive(Debug, Clone)]
 pub struct Burst {
@@ -74,7 +74,8 @@ impl CaptureType {
 
         match self {
             CaptureType::IPCapture { ignore_ports, .. } => {
-                let mut flows: HashMap<(IpAddr, IpAddr, Option<u16>, Option<u16>), IpFlow> = HashMap::new();
+                let mut flows: HashMap<(IpAddr, IpAddr, Option<u16>, Option<u16>), IpFlow> =
+                    HashMap::new();
                 for line in reader.lines() {
                     let packet = match IpPacket::from_tshark(&line.unwrap()) {
                         Ok(packet) => packet,
@@ -83,7 +84,12 @@ impl CaptureType {
                     let flow_key = if *ignore_ports {
                         (packet.src, packet.dst, None, None)
                     } else {
-                        (packet.src, packet.dst, Some(packet.src_port), Some(packet.dst_port))
+                        (
+                            packet.src,
+                            packet.dst,
+                            Some(packet.src_port),
+                            Some(packet.dst_port),
+                        )
                     };
                     flows
                         .entry(flow_key)
@@ -91,7 +97,11 @@ impl CaptureType {
                         .or_insert_with(|| IpFlow::new(&packet, opts.inactive_time, *ignore_ports));
                 }
             }
-            CaptureType::WLANCapture { no_guess , max_deviation, .. } => {
+            CaptureType::WLANCapture {
+                no_guess,
+                max_deviation,
+                ..
+            } => {
                 let mut flows: HashMap<(MacAddr, MacAddr), WlanFlow> = HashMap::new();
                 for line in reader.lines() {
                     let packet = match WlanPacket::from_tshark(&line.unwrap()) {
@@ -101,7 +111,9 @@ impl CaptureType {
                     flows
                         .entry((packet.src, packet.dst))
                         .and_modify(|flow| flow.add_packet(&packet, &opts.tx))
-                        .or_insert_with(|| WlanFlow::new(&packet, opts.inactive_time, *no_guess, *max_deviation));
+                        .or_insert_with(|| {
+                            WlanFlow::new(&packet, opts.inactive_time, *no_guess, *max_deviation)
+                        });
                 }
             }
         }
@@ -209,7 +221,7 @@ impl WlanFlow {
             self.current_burst.completion_time = p.time;
             tx.send(self.current_burst.clone()).unwrap();
             self.current_burst = Burst::from_wlan_packet(p);
-            
+
             // Accept sequence number of packet after the inactive time.
             self.expected_seq_number = (p.seq_number + 1) & 4095;
             self.last_packet_len = p.data_len;
@@ -221,7 +233,7 @@ impl WlanFlow {
                 self.current_burst.end = p.time;
                 self.current_burst.num_packets += 1;
                 self.current_burst.size += p.data_len;
-                return
+                return;
             }
 
             // Packet sequence number not what we expect.
@@ -232,7 +244,7 @@ impl WlanFlow {
             // Note: not enough to filter on the retransmission bit as the first frame might be lost.
             if -(self.max_deviation as i16) < signed_diff && signed_diff < 0 {
                 self.current_burst.end = p.time;
-                return
+                return;
             }
 
             // The packet has a sequence number that is further along than what we expect.

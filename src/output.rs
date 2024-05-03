@@ -1,10 +1,10 @@
 use std::{
     error::Error,
+    fmt::Write as FmtWrite,
     fs::File,
-    io::{Write, BufWriter},
+    io::{BufWriter, Write},
     sync::mpsc,
     thread,
-    fmt::Write as FmtWrite,
 };
 
 use crate::capture::Burst;
@@ -20,7 +20,14 @@ pub struct OutputWriter {
 }
 
 impl OutputWriter {
-    pub fn new(outfile: Option<String>, suppress: bool, min_bytes: Option<u32>, max_bytes: Option<u32>, min_packets: Option<u16>, max_packets: Option<u16>) -> Self {
+    pub fn new(
+        outfile: Option<String>,
+        suppress: bool,
+        min_bytes: Option<u32>,
+        max_bytes: Option<u32>,
+        min_packets: Option<u16>,
+        max_packets: Option<u16>,
+    ) -> Self {
         OutputWriter {
             outfile,
             suppress,
@@ -57,7 +64,7 @@ impl OutputWriter {
             loop {
                 let burst: Burst = match rx.recv() {
                     Ok(burst) => burst,
-                    
+
                     // Done when channel dropped.
                     Err(_) => break,
                 };
@@ -84,12 +91,13 @@ impl OutputWriter {
                     burst.end,
                     burst.num_packets,
                     burst.size,
-                ).expect("Error writing to line");
+                )
+                .expect("Error writing to line");
 
                 if !suppress {
                     println!("{}", line);
                 }
-    
+
                 if let Some(buffer) = &mut buffer {
                     writeln!(buffer, "{}", line).expect("Error writing to file");
                 }
@@ -97,7 +105,7 @@ impl OutputWriter {
                 count += 1;
             }
         }));
-    
+
         Ok(tx)
     }
 
