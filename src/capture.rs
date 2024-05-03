@@ -57,7 +57,8 @@ impl CaptureType {
             .args(&opts.tshark_args)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
-            .spawn()?;
+            .spawn()
+            .map_err(|err| format!("Failed to start tshark: {err}"))?;
 
         // Set up interrupt handler (ctrl-c)
         let running = Arc::new(AtomicBool::new(true));
