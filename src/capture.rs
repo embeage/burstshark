@@ -12,7 +12,6 @@ use std::{
     },
 };
 
-use ctrlc;
 use macaddr::MacAddr;
 use nix::sys::signal;
 
