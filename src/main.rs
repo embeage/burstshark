@@ -24,7 +24,7 @@ struct Args {
     /// Packet filter in Wireshark display filter syntax. Merged with default for data packets.
     #[clap(short = 'Y', long = "display-filter", requires = "infile")]
     display_filter: Option<String>,
-    
+
     /// Seconds with no activity to consider a new burst.
     #[clap(short = 't', long = "inactive-time", default_value_t = 1.0)]
     inactive_time: f64,
@@ -74,7 +74,12 @@ struct Args {
     no_guess: bool,
 
     /// Maximum allowed deviation from the expected sequence number for WLAN frames.
-    #[clap(short = 'M', long = "max-deviation", default_value_t = 50, requires = "monitor_mode")]
+    #[clap(
+        short = 'M',
+        long = "max-deviation",
+        default_value_t = 50,
+        requires = "monitor_mode"
+    )]
     max_deviation: u16,
 
     #[clap(value_delimiter=' ', hide(true), conflicts_with_all(["capture_filter", "display_filter"]))]
@@ -98,7 +103,9 @@ enum Protocol {
 
 fn tshark_args(protocol: &Protocol, args: Args) -> Vec<String> {
     let default_filter = match (&args.infile, &args.monitor_mode) {
-        (None, false) => String::from("udp or (tcp and (((ip[2:2] - ((ip[0]&0xf)<<2)) - ((tcp[12]&0xf0)>>2)) != 0))"),
+        (None, false) => String::from(
+            "udp or (tcp and (((ip[2:2] - ((ip[0]&0xf)<<2)) - ((tcp[12]&0xf0)>>2)) != 0))",
+        ),
         (None, true) => String::from("wlan type data subtype qos-data"),
         (Some(_), false) => String::from("udp or (tcp and tcp.len > 0)"),
         (Some(_), true) => String::from("wlan and wlan.fc.type_subtype == 40"),
@@ -107,20 +114,14 @@ fn tshark_args(protocol: &Protocol, args: Args) -> Vec<String> {
     let optional_filter = args.capture_filter.or(args.display_filter);
     let supplied_filter = optional_filter.or(args.positional_filter.map(|f| f.join(" ")));
 
-    let filter = match supplied_filter{
+    let filter = match supplied_filter {
         Some(filter) => format!("({}) and ({})", default_filter, filter),
         None => default_filter,
     };
 
     let mut tshark_args = match &args.infile {
-        Some(infile) => vec![
-            "-r", infile, 
-            "-Y", &filter,
-        ],
-        None => vec![
-            "-n",
-            "-f", &filter,
-        ],
+        Some(infile) => vec!["-r", infile, "-Y", &filter],
+        None => vec!["-n", "-f", &filter],
     };
 
     if let Some(interface) = &args.interface {
@@ -128,17 +129,16 @@ fn tshark_args(protocol: &Protocol, args: Args) -> Vec<String> {
     }
 
     if let Some(capture_outfile) = &args.capture_outfile {
-        tshark_args.extend(vec![
-            "-w", capture_outfile,
-            "-P",
-        ]);
+        tshark_args.extend(vec!["-w", capture_outfile, "-P"]);
     }
 
     tshark_args.extend(vec![
         "-Q",
         "-l",
-        "-T", "fields",
-        "-e", match args.time_format {
+        "-T",
+        "fields",
+        "-e",
+        match args.time_format {
             TimeFormat::Relative => "frame.time_relative",
             TimeFormat::Epoch => "frame.time_epoch",
         },
@@ -146,21 +146,27 @@ fn tshark_args(protocol: &Protocol, args: Args) -> Vec<String> {
 
     tshark_args.extend(match protocol {
         Protocol::Ip => vec![
-            "-e", "ip.src",
-            "-e", "ip.dst",
-            "-e", "udp.srcport",
-            "-e", "tcp.srcport",
-            "-e", "udp.dstport",
-            "-e", "tcp.dstport",
-            "-e", "data.len",
-            "-e", "udp.length",
-            "-e", "tcp.len",
+            "-e",
+            "ip.src",
+            "-e",
+            "ip.dst",
+            "-e",
+            "udp.srcport",
+            "-e",
+            "tcp.srcport",
+            "-e",
+            "udp.dstport",
+            "-e",
+            "tcp.dstport",
+            "-e",
+            "data.len",
+            "-e",
+            "udp.length",
+            "-e",
+            "tcp.len",
         ],
         Protocol::Wlan => vec![
-            "-e", "wlan.sa",
-            "-e", "wlan.da",
-            "-e", "data.len",
-            "-e", "wlan.seq",
+            "-e", "wlan.sa", "-e", "wlan.da", "-e", "data.len", "-e", "wlan.seq",
         ],
     });
 
@@ -187,19 +193,28 @@ fn main() {
         Ok(tx) => tx,
         Err(e) => {
             eprintln!("Error starting output writer: {}", e);
-            return
-        },
+            return;
+        }
     };
 
     let opts = CommonOptions {
         tshark_args: tshark_args(&protocol, args.clone()),
         inactive_time: args.inactive_time,
-        tx
+        tx,
     };
 
     let capture_result = match protocol {
-        Protocol::Ip => CaptureType::IPCapture { opts, ignore_ports: args.ignore_ports }.run(),
-        Protocol::Wlan => CaptureType::WLANCapture { opts, no_guess: args.no_guess, max_deviation: args.max_deviation }.run(),
+        Protocol::Ip => CaptureType::IPCapture {
+            opts,
+            ignore_ports: args.ignore_ports,
+        }
+        .run(),
+        Protocol::Wlan => CaptureType::WLANCapture {
+            opts,
+            no_guess: args.no_guess,
+            max_deviation: args.max_deviation,
+        }
+        .run(),
     };
 
     output_writer.stop();
