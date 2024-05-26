@@ -1,19 +1,18 @@
 # BurstShark
 
-**Note: README not yet complete**
-
 BurstShark is a network traffic analysis tool that wraps around tshark to identify and analyze bursty application data traffic, such as adaptive streaming, in real-time or from pcap files. It captures application data packets and frames and records their sizes, creating bursts that happen within a small window of time. The output of the program consists of a line for each burst between two addresses and/or port. In the case of WLAN capture, such as when using monitor mode, MAC addresses will be displayed instead of IP addresses.
 
 Each output line contains the following information:
 
 * Burst counter (incremental)
-* Completion time of the burst (relative or epoch time)
+* Completion time (s) of the burst relative to the program start
 * Source IP or MAC address
-* Source port (or empty no port)
+* Source port (0 if no port)
 * Destination IP or MAC address
-* Destination port (or empty if no port)
-* Start time of the burst (relative or epoch time)
-* End time of the burst (relative or epoch time)
+* Destination port (0 if no port)
+* Unix timestamp of the first packet in the burst
+* Unix timestamp of the last packet in the burst
+* Delay (s) between BurstShark reporting the burst and its last packet
 * Number of packets in the burst
 * Total size (in bytes) of the burst
 
@@ -29,39 +28,35 @@ Usage: burstshark [OPTIONS]
 
 Options:
   -i, --interface <INTERFACE>
-          Network interface to use for live capture. First non-loopback interface if no interface or file supplied
+          Network interface to use for live capture
+  -f, --capture-filter <CAPTURE_FILTER>
+          Packet filter for live capture in libpcap filter syntax
+  -s, --snapshot-length <SNAPLEN>
+          Number of bytes to capture per packet during live capture [default: 96]
   -r, --read-file <INFILE>
           Read packet data from infile
-  -f, --capture-filter <CAPTURE_FILTER>
-          Packet filter in libpcap filter syntax. Merged with default for data packets
   -Y, --display-filter <DISPLAY_FILTER>
-          Packet filter in Wireshark display filter syntax. Merged with default for data packets
-  -t, --inactive-time <INACTIVE_TIME>
-          Seconds with no activity to consider a new burst [default: 1]
-  -p, --ignore-ports
-          Ignore ports when and create bursts based on IP addresses only
-  -w, --write-capture <CAPTURE_OUTFILE>
-          Write captured packets by tshark to a capture file
-  -W, --write-bursts <BURSTS_OUTFILE>
-          Write output from BurstShark to a file
-  -q, --suppress
-          Don't display bursts on the standard output
+          Packet filter in Wireshark display filter syntax
+  -t, --burst_timeout <BURST_TIMEOUT>
+          Seconds with no flow activity for a burst to be considered complete [default: 0.5]
+  -a, --aggregate-ports
+          Aggregate ports for flows with the same IP src/dst pair to a single flow
+  -w, --write-pcap <PCAP_OUTFILE>
+          Write raw packet data read by tshark to pcap_outfile
   -b, --min-bytes <MIN_BYTES>
-          Only display bursts with a minimum amount of bytes
+          Only display bursts with a minimum size of min_bytes
   -B, --max-bytes <MAX_BYTES>
-          Only display bursts with a maximum amount of bytes
-  -n, --min-packets <MIN_PACKETS>
-          Only display bursts with a minimum amount of packets/frames
-  -N, --max-packets <MAX_PACKETS>
-          Only display bursts with a maximum amount of packets/frames
-  -T, --time-format <TIME_FORMAT>
-          Which time format to use for output [default: relative] [possible values: relative, epoch]
-  -I, --monitor-mode
-          Capture 802.11 WLAN frames instead of IP packets
-  -G, --no-guess
-          Disable guessing sizes of WLAN data frames missed by the monitor mode device
+          Only display bursts with a maximum size of max_bytes
+  -p, --min-packets <MIN_PACKETS>
+          Only display bursts with a minimum amount of min_packets packets/frames
+  -P, --max-packets <MAX_PACKETS>
+          Only display bursts with a maximum amount of max_packets packets/frames
+  -I, --wlan
+          Read 802.11 WLAN QoS data frames instead of IP packets
+  -E, --no-estimation
+          Disable frame size estimation for missed WLAN frames
   -M, --max-deviation <MAX_DEVIATION>
-          Maximum allowed deviation from the expected sequence number for WLAN frames [default: 50]
+          Maximum allowed deviation from the expected WLAN sequence number [default: 200]
   -h, --help
           Print help (see more with '--help')
   -V, --version

@@ -28,7 +28,7 @@ pub struct Burst {
 #[derive(Debug, Clone)]
 pub struct CommonOptions {
     pub tshark_args: Vec<String>,
-    pub inactive_time: f64,
+    pub burst_timeout: f64,
     pub output_tx: mpsc::Sender<Burst>,
 }
 
@@ -36,7 +36,7 @@ pub struct CommonOptions {
 pub enum CaptureType {
     Ip {
         opts: CommonOptions,
-        ignore_ports: bool,
+        aggregate_ports: bool,
     },
     Wlan {
         opts: CommonOptions,
@@ -93,7 +93,6 @@ impl CaptureType {
                                 Entry::Occupied(mut entry) => {
                                     entry.get_mut().send(packet).await?;
                                 },
-
                                 Entry::Vacant(entry) => {
                                     let flow_key = entry.key().clone();
                                     let capture_type = self.clone();
@@ -108,11 +107,9 @@ impl CaptureType {
                                 },
                             }
                         },
-
                         None => break,
                     }
                 },
-
                 Some(flow_key) = timeout_rx.recv() => {
                     // Remove flow. Drops sender and causes its flow_handler to exit.
                     flows.remove(&flow_key);
@@ -136,7 +133,7 @@ async fn flow_handler(
         CaptureType::Ip { opts, .. } | CaptureType::Wlan { opts, .. } => opts,
     };
 
-    let burst_timeout = Duration::from_secs_f64(opts.inactive_time);
+    let burst_timeout = Duration::from_secs_f64(opts.burst_timeout);
     let flow_timeout = Duration::from_secs_f64(FLOW_TIMEOUT);
 
     let mut flow = create_flow(capture_type);
@@ -158,18 +155,17 @@ async fn flow_handler(
                     continue;
                 }
 
-                // Flow has timed out due to inactivity.
-                // Will continue until None is received due to dropped sender.
+                // Flow has timed out due to inactivity. Handler will exit
+                // when sender is dropped and None is received.
                 timeout_tx.send(flow_key.clone()).await.unwrap();
             },
-
             packet = rx.recv() => {
                 match packet {
                     Some(packet) => {
                         if let Some(burst) = burst {
                             // If packet timestamps do not correlate with program time,
                             // e.g. due to file read, check if burst is ready.
-                            if packet.time - burst.end > opts.inactive_time {
+                            if packet.time - burst.end > opts.burst_timeout {
                                 opts.output_tx.send(burst.clone()).await.unwrap();
                                 flow.reset_burst();
                             }
@@ -177,7 +173,6 @@ async fn flow_handler(
 
                         flow.add_packet(&packet);
                     },
-
                     None => break,
                 }
             },
@@ -208,14 +203,16 @@ impl Packet {
         let (mut src_port, mut dst_port, mut seq_number) = (0, 0, None);
 
         match capture_type {
-            CaptureType::Ip { ignore_ports, .. } if !ignore_ports => {
+            CaptureType::Ip {
+                aggregate_ports, ..
+            } if !aggregate_ports => {
                 src_port = fields.next().ok_or("no source port")?.parse::<u16>()?;
                 dst_port = fields.next().ok_or("no destination port")?.parse::<u16>()?;
             }
             CaptureType::Wlan { .. } => {
                 seq_number = Some(fields.next().ok_or("no sequence number")?.parse::<u16>()?);
             }
-            _ => {}
+            _ => (),
         }
 
         Ok(Packet {
@@ -256,7 +253,6 @@ fn create_flow(capture_type: &CaptureType) -> Box<dyn Flow> {
         CaptureType::Ip { .. } => Box::new(IpFlow {
             current_burst: None,
         }),
-
         CaptureType::Wlan { .. } => Box::new(WlanFlow {
             no_estimation: false,
             max_deviation: 0,
