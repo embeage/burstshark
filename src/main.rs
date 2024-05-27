@@ -1,84 +1,104 @@
-use clap::{Parser, ValueEnum};
+use std::error::Error;
 
-mod capture;
-mod output;
+use clap::Parser;
 
-use capture::{CaptureType, CommonOptions};
-use output::OutputWriter;
+use burstshark::capture::{CaptureType, CommonOptions};
+use burstshark::output::OutputWriter;
 
 #[derive(Parser, Clone, Debug)]
 #[clap(author, version, about)]
 struct Args {
-    /// Network interface to use for live capture. First non-loopback interface if no interface or file supplied.
+    /// Network interface to use for live capture.
+    ///
+    /// Uses first non-loopback interface if no interface or file supplied.
     #[clap(short = 'i', long = "interface")]
     interface: Option<String>,
 
-    /// Read packet data from infile.
-    #[clap(short = 'r', long = "read-file", conflicts_with = "interface")]
-    infile: Option<String>,
-
-    /// Packet filter in libpcap filter syntax. Merged with default for data packets.
+    /// Packet filter for live capture in libpcap filter syntax.
+    ///
+    /// Merged with a default filter that captures UDP and TCP packets with payload,
+    /// or QoS data WLAN frames if WLAN is enabled.
     #[clap(short = 'f', long = "capture-filter", conflicts_with = "infile")]
     capture_filter: Option<String>,
 
-    /// Packet filter in Wireshark display filter syntax. Merged with default for data packets.
-    #[clap(short = 'Y', long = "display-filter", requires = "infile")]
+    /// Number of bytes to capture per packet during live capture.
+    ///
+    /// No more than snaplen bytes of each packet will be read into memory, or saved. The
+    /// default value is configured to capture relevant headers / packet length information
+    /// required for BurstShark. A snaplen of 0 will capture the entire packet.
+    #[clap(
+        short = 's',
+        long = "snapshot-length",
+        default_value_t = 96,
+        conflicts_with = "infile"
+    )]
+    snaplen: u32,
+
+    /// Read packet data from infile.
+    ///
+    /// Can be any capture file format supported by tshark, including gzipped files.
+    #[clap(short = 'r', long = "read-file", conflicts_with = "interface")]
+    infile: Option<String>,
+
+    /// Packet filter in Wireshark display filter syntax.
+    ///
+    /// Can be used for both live capture and reading from a file. Less efficient than a
+    /// capture filter for live capture so it is recommended to move as much of the
+    /// filtering logic as possible to the capture filter.
+    #[clap(short = 'Y', long = "display-filter")]
     display_filter: Option<String>,
 
-    /// Seconds with no activity to consider a new burst.
-    #[clap(short = 't', long = "inactive-time", default_value_t = 1.0)]
-    inactive_time: f64,
+    /// Seconds with no flow activity for a burst to be considered complete.
+    #[clap(short = 't', long = "burst_timeout", default_value_t = 0.5)]
+    burst_timeout: f64,
 
-    /// Ignore ports when and create bursts based on IP addresses only.
-    #[clap(short = 'p', long = "ignore-ports", conflicts_with = "monitor_mode")]
-    ignore_ports: bool,
+    /// Aggregate ports for flows with the same IP src/dst pair to a single flow.
+    ///
+    /// If enabled, output bursts will have a source and destination port of 0.
+    #[clap(short = 'a', long = "aggregate-ports", conflicts_with = "wlan")]
+    aggregate_ports: bool,
 
-    /// Write captured packets by tshark to a capture file.
-    #[clap(short = 'w', long = "write-capture")]
-    capture_outfile: Option<String>,
+    /// Write raw packet data read by tshark to pcap_outfile.
+    #[clap(short = 'w', long = "write-pcap")]
+    pcap_outfile: Option<String>,
 
-    /// Write output from BurstShark to a file.
-    #[clap(short = 'W', long = "write-bursts")]
-    bursts_outfile: Option<String>,
-
-    /// Don't display bursts on the standard output.
-    #[clap(short = 'q', long = "suppress")]
-    suppress: bool,
-
-    /// Only display bursts with a minimum amount of bytes.
+    /// Only display bursts with a minimum size of min_bytes.
     #[clap(short = 'b', long = "min-bytes")]
     min_bytes: Option<u32>,
 
-    /// Only display bursts with a maximum amount of bytes.
+    /// Only display bursts with a maximum size of max_bytes.
     #[clap(short = 'B', long = "max-bytes")]
     max_bytes: Option<u32>,
 
-    /// Only display bursts with a minimum amount of packets/frames.
-    #[clap(short = 'n', long = "min-packets")]
+    /// Only display bursts with a minimum amount of min_packets packets/frames.
+    #[clap(short = 'p', long = "min-packets")]
     min_packets: Option<u16>,
 
-    /// Only display bursts with a maximum amount of packets/frames.
-    #[clap(short = 'N', long = "max-packets")]
+    /// Only display bursts with a maximum amount of max_packets packets/frames.
+    #[clap(short = 'P', long = "max-packets")]
     max_packets: Option<u16>,
 
-    /// Which time format to use for output.
-    #[clap(value_enum, short = 'T', long = "time-format", default_value_t = TimeFormat::Relative)]
-    time_format: TimeFormat,
+    /// Read 802.11 WLAN QoS data frames instead of IP packets.
+    ///
+    /// For live capture, the interface should be in monitor mode.
+    #[clap(short = 'I', long = "wlan")]
+    wlan: bool,
 
-    /// Capture 802.11 WLAN frames instead of IP packets.
-    #[clap(short = 'I', long = "monitor-mode")]
-    monitor_mode: bool,
+    /// Disable frame size estimation for missed WLAN frames.
+    ///
+    /// By default, missed WLAN frames will have their sizes estimated based on the
+    /// average size of the frames captured.
+    #[clap(short = 'E', long = "no-estimation", requires = "wlan")]
+    no_estimation: bool,
 
-    /// Disable guessing sizes of WLAN data frames missed by the monitor mode device.
-    #[clap(short = 'G', long = "no-guess", requires = "monitor_mode")]
-    no_guess: bool,
-
-    /// Maximum allowed deviation from the expected sequence number for WLAN frames.
+    /// Maximum allowed deviation from the expected WLAN sequence number.
+    ///
+    /// Only frames within max_deviation will be considered and estimated.
     #[clap(
         short = 'M',
         long = "max-deviation",
-        default_value_t = 50,
-        requires = "monitor_mode"
+        default_value_t = 200,
+        requires = "wlan"
     )]
     max_deviation: u16,
 
@@ -86,23 +106,35 @@ struct Args {
     positional_filter: Option<Vec<String>>,
 }
 
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
-enum TimeFormat {
-    /// Time relative to the first packet/frame.
-    Relative,
+fn tshark_args(args: Args) -> Vec<String> {
+    let mut tshark_args = vec!["-l", "-q", "-n", "-T", "fields"];
 
-    /// Time in seconds since the UNIX epoch.
-    Epoch,
-}
+    #[rustfmt::skip]
+    tshark_args.extend(match args.wlan {
+        false => vec![
+            "-e", "frame.time_epoch",
+            "-e", "ip.src",
+            "-e", "ipv6.src",
+            "-e", "ip.dst",
+            "-e", "ipv6.dst",
+            "-e", "data.len",
+            "-e", "udp.length",
+            "-e", "tcp.len",
+            "-e", "udp.srcport",
+            "-e", "tcp.srcport",
+            "-e", "udp.dstport",
+            "-e", "tcp.dstport",
+        ],
+        true => vec![
+            "-e", "frame.time_epoch",
+            "-e", "wlan.sa",
+            "-e", "wlan.da",
+            "-e", "data.len",
+            "-e", "wlan.seq",
+        ],
+    });
 
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
-enum Protocol {
-    Ip,
-    Wlan,
-}
-
-fn tshark_args(protocol: &Protocol, args: Args) -> Vec<String> {
-    let default_filter = match (&args.infile, &args.monitor_mode) {
+    let base_filter = match (&args.infile, &args.wlan) {
         (None, false) => String::from(
             "udp or (tcp and (((ip[2:2] - ((ip[0]&0xf)<<2)) - ((tcp[12]&0xf0)>>2)) != 0))",
         ),
@@ -111,115 +143,75 @@ fn tshark_args(protocol: &Protocol, args: Args) -> Vec<String> {
         (Some(_), true) => String::from("wlan and wlan.fc.type_subtype == 40"),
     };
 
-    let optional_filter = args.capture_filter.or(args.display_filter);
-    let supplied_filter = optional_filter.or(args.positional_filter.map(|f| f.join(" ")));
-
-    let filter = match supplied_filter {
-        Some(filter) => format!("({}) and ({})", default_filter, filter),
-        None => default_filter,
+    let create_filter = |optional_filter: Option<String>| -> Option<String> {
+        match optional_filter.or(args.positional_filter.map(|f| f.join(" "))) {
+            Some(filter) => Some(format!("({}) and ({})", base_filter, filter)),
+            None => Some(base_filter),
+        }
     };
 
-    let mut tshark_args = match &args.infile {
-        Some(infile) => vec!["-r", infile, "-Y", &filter],
-        None => vec!["-n", "-f", &filter],
+    let (capture_filter, display_filter) = match &args.infile {
+        None => (create_filter(args.capture_filter), args.display_filter),
+        Some(_) => (None, create_filter(args.display_filter)),
     };
+
+    let snapshot_length = args.snaplen.to_string();
+
+    if let Some(capture_filter) = &capture_filter {
+        tshark_args.extend(vec!["-s", &snapshot_length, "-f", capture_filter]);
+    }
+
+    if let Some(display_filter) = &display_filter {
+        tshark_args.extend(vec!["-Y", display_filter]);
+    }
 
     if let Some(interface) = &args.interface {
         tshark_args.extend(vec!["-i", interface]);
     }
 
-    if let Some(capture_outfile) = &args.capture_outfile {
-        tshark_args.extend(vec!["-w", capture_outfile, "-P"]);
+    if let Some(infile) = &args.infile {
+        tshark_args.extend(vec!["-r", infile]);
     }
 
-    tshark_args.extend(vec![
-        "-Q",
-        "-l",
-        "-T",
-        "fields",
-        "-e",
-        match args.time_format {
-            TimeFormat::Relative => "frame.time_relative",
-            TimeFormat::Epoch => "frame.time_epoch",
-        },
-    ]);
-
-    tshark_args.extend(match protocol {
-        Protocol::Ip => vec![
-            "-e",
-            "ip.src",
-            "-e",
-            "ip.dst",
-            "-e",
-            "udp.srcport",
-            "-e",
-            "tcp.srcport",
-            "-e",
-            "udp.dstport",
-            "-e",
-            "tcp.dstport",
-            "-e",
-            "data.len",
-            "-e",
-            "udp.length",
-            "-e",
-            "tcp.len",
-        ],
-        Protocol::Wlan => vec![
-            "-e", "wlan.sa", "-e", "wlan.da", "-e", "data.len", "-e", "wlan.seq",
-        ],
-    });
+    if let Some(pcap_outfile) = &args.pcap_outfile {
+        tshark_args.extend(vec!["-w", pcap_outfile, "-P"]);
+    }
 
     tshark_args.into_iter().map(str::to_string).collect()
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let args: Args = Args::parse();
-    let protocol = match args.monitor_mode {
-        true => Protocol::Wlan,
-        false => Protocol::Ip,
-    };
 
-    let mut output_writer = OutputWriter::new(
-        args.bursts_outfile.clone(),
-        args.suppress,
+    let output_tx = OutputWriter::new(
         args.min_bytes,
         args.max_bytes,
         args.min_packets,
         args.max_packets,
-    );
-
-    let tx = match output_writer.start() {
-        Ok(tx) => tx,
-        Err(e) => {
-            eprintln!("Error starting output writer: {}", e);
-            return;
-        }
-    };
+    )
+    .start()
+    .await;
 
     let opts = CommonOptions {
-        tshark_args: tshark_args(&protocol, args.clone()),
-        inactive_time: args.inactive_time,
-        tx,
+        tshark_args: tshark_args(args.clone()),
+        burst_timeout: args.burst_timeout,
+        output_tx,
     };
 
-    let capture_result = match protocol {
-        Protocol::Ip => CaptureType::IPCapture {
+    match args.wlan {
+        false => CaptureType::Ip {
             opts,
-            ignore_ports: args.ignore_ports,
-        }
-        .run(),
-        Protocol::Wlan => CaptureType::WLANCapture {
+            aggregate_ports: args.aggregate_ports,
+        },
+        true => CaptureType::Wlan {
             opts,
-            no_guess: args.no_guess,
+            no_estimation: args.no_estimation,
             max_deviation: args.max_deviation,
-        }
-        .run(),
-    };
-
-    output_writer.stop();
-
-    if let Err(e) = capture_result {
-        eprintln!("Error running capture: {}", e);
+        },
     }
+    .run()
+    .await?;
+
+    Ok(())
 }

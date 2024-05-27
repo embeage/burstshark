@@ -6,7 +6,6 @@ description = "BurstShark is a network traffic analysis tool that wraps around t
 edition = "2021"
 
 [dependencies]
-clap = { version = "4.2.0", features = ["derive", "env"] }
-ctrlc = "3.2.5"
-macaddr = "1.0.1"
-nix = "0.26.2"
+clap = { version = "4.2.0", features = ["derive"] }
+nix = { version = "0.26.2", features = ["signal"] }
+tokio = { version = "1.37.0", features = ["io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }

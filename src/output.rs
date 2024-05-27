@@ -1,104 +1,84 @@
-use std::{
-    error::Error,
-    fmt::Write as FmtWrite,
-    fs::File,
-    io::{BufWriter, Write},
-    sync::mpsc,
-    thread,
-};
+use std::io::{stdout, Write};
+use std::time::SystemTime;
+
+use tokio::sync::mpsc;
 
 use crate::capture::Burst;
 
 pub struct OutputWriter {
-    outfile: Option<String>,
-    suppress: bool,
     min_bytes: Option<u32>,
     max_bytes: Option<u32>,
     min_packets: Option<u16>,
     max_packets: Option<u16>,
-    handle: Option<thread::JoinHandle<()>>,
 }
 
 impl OutputWriter {
     pub fn new(
-        outfile: Option<String>,
-        suppress: bool,
         min_bytes: Option<u32>,
         max_bytes: Option<u32>,
         min_packets: Option<u16>,
         max_packets: Option<u16>,
     ) -> Self {
         OutputWriter {
-            outfile,
-            suppress,
             min_bytes,
             max_bytes,
             min_packets,
             max_packets,
-            handle: None,
         }
     }
 
-    pub fn start(&mut self) -> Result<mpsc::Sender<Burst>, Box<dyn Error>> {
-        let (tx, rx) = mpsc::channel::<Burst>();
+    pub async fn start(&mut self) -> mpsc::Sender<Burst> {
+        let (tx, mut rx) = mpsc::channel::<Burst>(100);
 
-        let file = self.outfile.as_ref().map(File::create).transpose()?;
-
-        let suppress = self.suppress;
         let min_bytes = self.min_bytes;
         let max_bytes = self.max_bytes;
         let min_packets = self.min_packets;
         let max_packets = self.max_packets;
 
-        self.handle = Some(thread::spawn(move || {
-            let mut line = String::with_capacity(256);
-            let mut count = 1;
-            let mut buffer = file.map(BufWriter::new);
+        tokio::spawn(async move {
+            let stdout = stdout();
+            let start_time = SystemTime::now();
+            let mut count = 0;
 
-            while let Ok(burst) = rx.recv() {
-                if (min_bytes.map_or(false, |min| min >= burst.size))
-                    || (max_bytes.map_or(false, |max| max <= burst.size))
-                    || (min_packets.map_or(false, |min| min >= burst.num_packets))
-                    || (max_packets.map_or(false, |max| max <= burst.num_packets))
+            while let Some(burst) = rx.recv().await {
+                if (min_bytes.map_or(false, |min| burst.size < min))
+                    || (max_bytes.map_or(false, |max| burst.size > max))
+                    || (min_packets.map_or(false, |min| burst.num_packets < min))
+                    || (max_packets.map_or(false, |max| burst.num_packets > max))
                 {
                     continue;
                 }
 
-                line.clear();
-                write!(
-                    &mut line,
-                    "{:5} {:13.9} {:15} {:6} {:15} {:5} {:13.9} {:13.9} {:4} {}",
+                count += 1;
+
+                let elapsed = start_time.elapsed().unwrap_or_default().as_secs_f64();
+                let delay = SystemTime::UNIX_EPOCH
+                    .elapsed()
+                    .unwrap_or_default()
+                    .as_secs_f64()
+                    - burst.end;
+
+                let mut handle = stdout.lock();
+
+                writeln!(
+                    &mut handle,
+                    "{:5} {:13.9} {:15} {:6} {:15} {:5} {:13.9} {:13.9} {:13.9} {:4} {}",
                     count,
-                    burst.completion_time,
+                    elapsed,
                     burst.src,
-                    burst.src_port.map_or("".to_string(), |p| p.to_string()),
+                    burst.src_port,
                     burst.dst,
-                    burst.dst_port.map_or("".to_string(), |p| p.to_string()),
+                    burst.dst_port,
                     burst.start,
                     burst.end,
+                    delay,
                     burst.num_packets,
                     burst.size,
                 )
-                .expect("Error writing to line");
-
-                if !suppress {
-                    println!("{}", line);
-                }
-
-                if let Some(buffer) = &mut buffer {
-                    writeln!(buffer, "{}", line).expect("Error writing to file");
-                }
-
-                count += 1;
+                .unwrap();
             }
-        }));
+        });
 
-        Ok(tx)
-    }
-
-    pub fn stop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.join().unwrap();
-        }
+        tx
     }
 }

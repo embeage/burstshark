@@ -1,55 +1,54 @@
-use std::{
-    collections::HashMap,
-    error::Error,
-    io::BufRead,
-    net::IpAddr,
-    process::{Command, Stdio},
-    str::FromStr,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc::Sender,
-        Arc,
-    },
-};
+use std::collections::{hash_map::Entry, HashMap};
+use std::error::Error;
+use std::process::Stdio;
 
-use macaddr::MacAddr;
-use nix::sys::signal;
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::mpsc;
+use tokio::time::{sleep, Duration};
+
+const FLOW_TIMEOUT: f64 = 30.0;
+
+type FlowKey = (String, String, u16, u16);
 
 #[derive(Debug, Clone)]
 pub struct Burst {
-    pub completion_time: f64,
     pub src: String,
     pub dst: String,
-    pub src_port: Option<u16>,
-    pub dst_port: Option<u16>,
+    pub src_port: u16,
+    pub dst_port: u16,
     pub start: f64,
     pub end: f64,
     pub num_packets: u16,
     pub size: u32,
 }
 
+#[derive(Debug, Clone)]
 pub struct CommonOptions {
     pub tshark_args: Vec<String>,
-    pub inactive_time: f64,
-    pub tx: Sender<Burst>,
+    pub burst_timeout: f64,
+    pub output_tx: mpsc::Sender<Burst>,
 }
 
+#[derive(Debug, Clone)]
 pub enum CaptureType {
-    IPCapture {
+    Ip {
         opts: CommonOptions,
-        ignore_ports: bool,
+        aggregate_ports: bool,
     },
-    WLANCapture {
+    Wlan {
         opts: CommonOptions,
-        no_guess: bool,
+        no_estimation: bool,
         max_deviation: u16,
     },
 }
 
 impl CaptureType {
-    pub fn run(&self) -> Result<(), Box<dyn Error>> {
+    pub async fn run(&self) -> Result<(), Box<dyn Error>> {
         let opts = match self {
-            CaptureType::IPCapture { opts, .. } | CaptureType::WLANCapture { opts, .. } => opts,
+            CaptureType::Ip { opts, .. } | CaptureType::Wlan { opts, .. } => opts,
         };
 
         let mut tshark = Command::new("tshark")
@@ -57,245 +56,306 @@ impl CaptureType {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .map_err(|err| format!("Failed to start tshark: {err}"))?;
+            .map_err(|err| format!("failed to start tshark: {}", err))?;
 
-        // Set up interrupt handler (ctrl-c)
-        let running = Arc::new(AtomicBool::new(true));
-        let r = running.clone();
-        let tshark_pid = tshark.id() as i32;
-        ctrlc::set_handler(move || {
-            r.store(false, Ordering::SeqCst);
-            let pid = nix::unistd::Pid::from_raw(tshark_pid);
-            signal::kill(pid, signal::Signal::SIGINT).expect("Failed to send SIGINT to tshark");
-        })?;
+        if let Some(tshark_pid) = tshark.id() {
+            let tshark_pid = tshark_pid as i32;
+            tokio::spawn(async move {
+                tokio::signal::ctrl_c().await.unwrap();
+                kill(Pid::from_raw(tshark_pid), Signal::SIGTERM).unwrap();
+            });
+        }
 
         let stdout = tshark.stdout.take().unwrap();
-        let reader = std::io::BufReader::new(stdout);
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
 
-        match self {
-            CaptureType::IPCapture { ignore_ports, .. } => {
-                let mut flows: HashMap<(IpAddr, IpAddr, Option<u16>, Option<u16>), IpFlow> =
-                    HashMap::new();
-                for line in reader.lines() {
-                    let packet = match IpPacket::from_tshark(&line.unwrap()) {
-                        Ok(packet) => packet,
-                        Err(_) => continue,
-                    };
-                    let flow_key = if *ignore_ports {
-                        (packet.src, packet.dst, None, None)
-                    } else {
-                        (
-                            packet.src,
-                            packet.dst,
-                            Some(packet.src_port),
-                            Some(packet.dst_port),
-                        )
-                    };
-                    flows
-                        .entry(flow_key)
-                        .and_modify(|flow| flow.add_packet(&packet, &opts.tx, opts.inactive_time))
-                        .or_insert_with(|| IpFlow::new(&packet, *ignore_ports));
-                }
-            }
-            CaptureType::WLANCapture {
-                no_guess,
-                max_deviation,
-                ..
-            } => {
-                let mut flows: HashMap<(MacAddr, MacAddr), WlanFlow> = HashMap::new();
-                for line in reader.lines() {
-                    let packet = match WlanPacket::from_tshark(&line.unwrap()) {
-                        Ok(packet) => packet,
-                        Err(_) => continue,
-                    };
-                    flows
-                        .entry((packet.src, packet.dst))
-                        .and_modify(|flow| flow.add_packet(&packet, &opts.tx, opts.inactive_time))
-                        .or_insert_with(|| WlanFlow::new(&packet, *no_guess, *max_deviation));
-                }
+        let mut flows = HashMap::<FlowKey, mpsc::Sender<Packet>>::new();
+        let (timeout_tx, mut timeout_rx) = mpsc::channel::<FlowKey>(100);
+
+        loop {
+            tokio::select! {
+                line = lines.next_line() => {
+                    match line? {
+                        Some(line) => {
+                            let packet = Packet::from_tshark(&line, self).map_err(|err| {
+                                format!("failed to parse packet: {}", err)
+                            })?;
+
+                            let flow_key = (
+                                packet.src.clone(),
+                                packet.dst.clone(),
+                                packet.src_port,
+                                packet.dst_port,
+                            );
+
+                            match flows.entry(flow_key) {
+                                Entry::Occupied(mut entry) => {
+                                    entry.get_mut().send(packet).await?;
+                                },
+                                Entry::Vacant(entry) => {
+                                    let flow_key = entry.key().clone();
+                                    let capture_type = self.clone();
+                                    let (packet_tx, packet_rx) = mpsc::channel(100);
+                                    let timeout_tx = timeout_tx.clone();
+
+                                    tokio::spawn(async move {
+                                        flow_handler(flow_key, &capture_type, packet_rx, timeout_tx).await;
+                                    });
+
+                                    entry.insert(packet_tx).send(packet).await?;
+                                },
+                            }
+                        },
+                        None => break,
+                    }
+                },
+                Some(flow_key) = timeout_rx.recv() => {
+                    // Remove flow. Drops sender and causes its flow_handler to exit.
+                    flows.remove(&flow_key);
+                },
             }
         }
 
-        tshark.wait()?;
+        tshark.wait().await?;
+
         Ok(())
     }
 }
 
-struct IpPacket {
+async fn flow_handler(
+    flow_key: FlowKey,
+    capture_type: &CaptureType,
+    mut rx: mpsc::Receiver<Packet>,
+    timeout_tx: mpsc::Sender<FlowKey>,
+) {
+    let opts = match capture_type {
+        CaptureType::Ip { opts, .. } | CaptureType::Wlan { opts, .. } => opts,
+    };
+
+    let burst_timeout = Duration::from_secs_f64(opts.burst_timeout);
+    let flow_timeout = Duration::from_secs_f64(FLOW_TIMEOUT);
+
+    let mut flow = create_flow(capture_type);
+
+    loop {
+        let burst = flow.get_current_burst();
+
+        let timeout = if burst.is_some() {
+            sleep(burst_timeout)
+        } else {
+            sleep(flow_timeout)
+        };
+
+        tokio::select! {
+            _ = timeout => {
+                if let Some(burst) = burst {
+                    opts.output_tx.send(burst.clone()).await.unwrap();
+                    flow.reset_burst();
+                    continue;
+                }
+
+                // Flow has timed out due to inactivity. Handler will exit
+                // when sender is dropped and None is received.
+                timeout_tx.send(flow_key.clone()).await.unwrap();
+            },
+            packet = rx.recv() => {
+                match packet {
+                    Some(packet) => {
+                        if let Some(burst) = burst {
+                            // If packet timestamps do not correlate with program time,
+                            // e.g. due to file read, check if burst is ready.
+                            if packet.time - burst.end > opts.burst_timeout {
+                                opts.output_tx.send(burst.clone()).await.unwrap();
+                                flow.reset_burst();
+                            }
+                        }
+
+                        flow.add_packet(&packet);
+                    },
+                    None => break,
+                }
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Packet {
     time: f64,
-    src: IpAddr,
-    dst: IpAddr,
+    src: String,
+    dst: String,
+    data_len: u32,
     src_port: u16,
     dst_port: u16,
-    data_len: u32,
+    seq_number: Option<u16>,
 }
 
-struct WlanPacket {
-    time: f64,
-    src: MacAddr,
-    dst: MacAddr,
-    data_len: u32,
-    seq_number: u16,
-}
-
-struct IpFlow {
-    ignore_ports: bool,
-    current_burst: Burst,
-}
-
-struct WlanFlow {
-    current_burst: Burst,
-    expected_seq_number: u16,
-    last_packet_len: u32,
-    no_guess: bool,
-    max_deviation: u16,
-}
-
-impl IpPacket {
-    fn from_tshark(line: &str) -> Result<Self, Box<dyn Error>> {
+impl Packet {
+    fn from_tshark(line: &str, capture_type: &CaptureType) -> Result<Self, Box<dyn Error>> {
         let mut fields = line.split_whitespace();
-        Ok(IpPacket {
-            time: fields.next().unwrap().parse::<f64>()?,
-            src: IpAddr::from_str(fields.next().unwrap())?,
-            dst: IpAddr::from_str(fields.next().unwrap())?,
-            src_port: fields.next().unwrap().parse::<u16>()?,
-            dst_port: fields.next().unwrap().parse::<u16>()?,
-            data_len: fields.next().unwrap().parse::<u32>()?,
+
+        let time = fields.next().ok_or("no time")?.parse::<f64>()?;
+        let src = fields.next().ok_or("no source")?;
+        let dst = fields.next().ok_or("no destination")?;
+        let data_len = fields.next().ok_or("no length")?.parse::<u32>()?;
+
+        let (mut src_port, mut dst_port, mut seq_number) = (0, 0, None);
+
+        match capture_type {
+            CaptureType::Ip {
+                aggregate_ports, ..
+            } if !aggregate_ports => {
+                src_port = fields.next().ok_or("no source port")?.parse::<u16>()?;
+                dst_port = fields.next().ok_or("no destination port")?.parse::<u16>()?;
+            }
+            CaptureType::Wlan { .. } => {
+                seq_number = Some(fields.next().ok_or("no sequence number")?.parse::<u16>()?);
+            }
+            _ => (),
+        }
+
+        Ok(Packet {
+            time,
+            src: src.to_string(),
+            dst: dst.to_string(),
+            data_len,
+            src_port,
+            dst_port,
+            seq_number,
         })
-    }
-}
-
-impl WlanPacket {
-    fn from_tshark(line: &str) -> Result<Self, Box<dyn Error>> {
-        let mut fields = line.split_whitespace();
-        Ok(WlanPacket {
-            time: fields.next().unwrap().parse::<f64>()?,
-            src: MacAddr::from_str(fields.next().unwrap())?,
-            dst: MacAddr::from_str(fields.next().unwrap())?,
-            data_len: fields.next().unwrap().parse::<u32>()?,
-            seq_number: fields.next().unwrap().parse::<u16>()?,
-        })
-    }
-}
-
-impl IpFlow {
-    fn new(p: &IpPacket, ignore_ports: bool) -> Self {
-        IpFlow {
-            ignore_ports,
-            current_burst: Burst::from_ip_packet(p, ignore_ports),
-        }
-    }
-
-    fn add_packet(&mut self, p: &IpPacket, tx: &Sender<Burst>, inactive_time: f64) {
-        if p.time - self.current_burst.end > inactive_time {
-            self.current_burst.completion_time = p.time;
-            tx.send(self.current_burst.clone()).unwrap();
-            self.current_burst = Burst::from_ip_packet(p, self.ignore_ports);
-        } else {
-            self.current_burst.end = p.time;
-            self.current_burst.num_packets += 1;
-            self.current_burst.size += p.data_len;
-        }
-    }
-}
-
-impl WlanFlow {
-    fn new(p: &WlanPacket, no_guess: bool, max_deviation: u16) -> Self {
-        WlanFlow {
-            current_burst: Burst::from_wlan_packet(p),
-            expected_seq_number: p.seq_number,
-            last_packet_len: p.data_len,
-            no_guess,
-            max_deviation,
-        }
-    }
-
-    fn add_packet(&mut self, p: &WlanPacket, tx: &Sender<Burst>, inactive_time: f64) {
-        if p.time - self.current_burst.end > inactive_time {
-            self.current_burst.completion_time = p.time;
-            tx.send(self.current_burst.clone()).unwrap();
-            self.current_burst = Burst::from_wlan_packet(p);
-
-            // Accept sequence number of packet after the inactive time.
-            self.expected_seq_number = (p.seq_number + 1) & 4095;
-            self.last_packet_len = p.data_len;
-        } else {
-            // Packet sequence number is what we expect.
-            if p.seq_number == self.expected_seq_number {
-                self.expected_seq_number = (p.seq_number + 1) & 4095;
-                self.last_packet_len = p.data_len;
-                self.current_burst.end = p.time;
-                self.current_burst.num_packets += 1;
-                self.current_burst.size += p.data_len;
-                return;
-            }
-
-            // Packet sequence number not what we expect.
-            let diff = (p.seq_number as i16 - self.expected_seq_number as i16) & 4095;
-            let signed_diff = if diff <= 2048 { diff } else { diff - 4096 };
-
-            // We already added this packet, but it is probably being retransmitted.
-            // Note: not enough to filter on the retransmission bit as the first frame might be lost.
-            if -(self.max_deviation as i16) < signed_diff && signed_diff < 0 {
-                self.current_burst.end = p.time;
-                return;
-            }
-
-            // The packet has a sequence number that is further along than what we expect.
-            // Monitor mode device might have missed frames.
-            if 0 < signed_diff && signed_diff < self.max_deviation as i16 {
-                if !self.no_guess {
-                    // Guess the lengths of the lost frames
-                    let guess = (self.last_packet_len + p.data_len) / 2;
-                    self.current_burst.num_packets += diff as u16;
-                    self.current_burst.size += guess * diff as u32;
-                } else {
-                    // Accept only this
-                    self.current_burst.num_packets += 1;
-                    self.current_burst.size += p.data_len;
-                }
-                // Bring the expected sequence number in line with the packet.
-                self.expected_seq_number = (p.seq_number + 1) & 4095;
-                self.last_packet_len = p.data_len;
-                self.current_burst.end = p.time;
-            } else {
-                // In case of a larger deviation, might be a single outlier, go to next expected.
-                self.expected_seq_number = (self.expected_seq_number + 1) & 4095;
-            }
-        }
     }
 }
 
 impl Burst {
-    fn from_ip_packet(p: &IpPacket, ignore_ports: bool) -> Self {
-        let (src_port, dst_port) = if ignore_ports {
-            (None, None)
-        } else {
-            (Some(p.src_port), Some(p.dst_port))
-        };
+    fn from_packet(p: &Packet) -> Self {
         Burst {
-            completion_time: p.time,
-            src: p.src.to_string(),
-            dst: p.dst.to_string(),
-            src_port,
-            dst_port,
+            src: p.src.clone(),
+            dst: p.dst.clone(),
+            src_port: p.src_port,
+            dst_port: p.dst_port,
             start: p.time,
             end: p.time,
             num_packets: 1,
             size: p.data_len,
         }
     }
-    fn from_wlan_packet(p: &WlanPacket) -> Self {
-        Burst {
-            completion_time: p.time,
-            src: p.src.to_string(),
-            dst: p.dst.to_string(),
-            src_port: None,
-            dst_port: None,
-            start: p.time,
-            end: p.time,
-            num_packets: 1,
-            size: p.data_len,
+}
+
+trait Flow: Send {
+    fn add_packet(&mut self, p: &Packet);
+    fn get_current_burst(&self) -> &Option<Burst>;
+    fn reset_burst(&mut self);
+}
+
+fn create_flow(capture_type: &CaptureType) -> Box<dyn Flow> {
+    match capture_type {
+        CaptureType::Ip { .. } => Box::new(IpFlow {
+            current_burst: None,
+        }),
+        CaptureType::Wlan { .. } => Box::new(WlanFlow {
+            no_estimation: false,
+            max_deviation: 0,
+            expected_seq_number: 0,
+            last_packet_len: 0,
+            current_burst: None,
+        }),
+    }
+}
+
+struct IpFlow {
+    current_burst: Option<Burst>,
+}
+
+impl Flow for IpFlow {
+    fn add_packet(&mut self, p: &Packet) {
+        if self.current_burst.is_none() {
+            self.current_burst = Some(Burst::from_packet(p));
+            return;
         }
+
+        let burst = self.current_burst.as_mut().unwrap();
+
+        burst.end = p.time;
+        burst.num_packets += 1;
+        burst.size += p.data_len;
+    }
+
+    fn get_current_burst(&self) -> &Option<Burst> {
+        &self.current_burst
+    }
+
+    fn reset_burst(&mut self) {
+        self.current_burst = None;
+    }
+}
+
+struct WlanFlow {
+    no_estimation: bool,
+    max_deviation: u16,
+    expected_seq_number: u16,
+    last_packet_len: u32,
+    current_burst: Option<Burst>,
+}
+
+impl Flow for WlanFlow {
+    fn add_packet(&mut self, p: &Packet) {
+        if self.current_burst.is_none() {
+            self.current_burst = Some(Burst::from_packet(p));
+            self.expected_seq_number = (p.seq_number.unwrap() + 1) & 4095;
+            self.last_packet_len = p.data_len;
+            return;
+        }
+
+        let burst = self.current_burst.as_mut().unwrap();
+        let seq_number = p.seq_number.unwrap();
+
+        if seq_number == self.expected_seq_number {
+            self.expected_seq_number = (seq_number + 1) & 4095;
+            self.last_packet_len = p.data_len;
+            burst.end = p.time;
+            burst.num_packets += 1;
+            burst.size += p.data_len;
+            return;
+        }
+
+        // Sequence number not what we expect.
+        let diff = (seq_number as i16 - self.expected_seq_number as i16) & 4095;
+        let signed_diff = if diff <= 2048 { diff } else { diff - 4096 };
+
+        // Check if frame already added. Could be a retransmission.
+        // Not enough to filter on the retransmission bit as the first frame might be lost.
+        if -(self.max_deviation as i16) < signed_diff && signed_diff < 0 {
+            burst.end = p.time;
+            return;
+        }
+
+        // Sequence number is further along than what we expect. Could be lost frame(s).
+        if 0 < signed_diff && signed_diff < self.max_deviation as i16 {
+            if !self.no_estimation {
+                let estimate = (self.last_packet_len + p.data_len) / 2;
+                burst.num_packets += diff as u16;
+                burst.size += estimate * diff as u32;
+            } else {
+                // Accept only this frame if estimation is disabled.
+                burst.num_packets += 1;
+                burst.size += p.data_len;
+            }
+            // Bring the expected sequence number in line with the new frame.
+            self.expected_seq_number = (seq_number + 1) & 4095;
+            self.last_packet_len = p.data_len;
+            burst.end = p.time;
+        } else {
+            // Larger deviation than allowed, go to next expected.
+            self.expected_seq_number = (self.expected_seq_number + 1) & 4095;
+        }
+    }
+
+    fn get_current_burst(&self) -> &Option<Burst> {
+        &self.current_burst
+    }
+
+    fn reset_burst(&mut self) {
+        self.current_burst = None;
     }
 }
